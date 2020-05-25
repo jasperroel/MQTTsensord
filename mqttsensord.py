@@ -96,6 +96,8 @@ def apcaccess_json(host='localhost', port='3551'):
                 except ValueError:
                     pass
                 ups_data[k] = v
+            if k == 'STATUS':
+                ups_data['STATUS_BOOL'] = 1 if v == 'ONLINE' else 0
         except Exception as e:
             logger.error("Error parsing apcupsd line: {}".format(e))
             logger.error(line)
