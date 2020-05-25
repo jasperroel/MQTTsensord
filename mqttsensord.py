@@ -181,7 +181,7 @@ def set_logging(logf):
         ch.setLevel(logging.DEBUG)
         logger.addHandler(ch)
     else:
-        logger.setLevel(logging.DEBUG)
+        logger.setLevel(logging.INFO)
     fh = logging.FileHandler(logf)
     formatstr = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     formatter = logging.Formatter(formatstr)
@@ -195,11 +195,11 @@ def set_logging(logf):
 def get_config_file(configf):
     with open(configf) as json_data_file:
         try:
+            logger.debug("config found: %s", json_data_file)
             return json.load(json_data_file)
         except json.JSONDecodeError as parse_error:
             logger.error("JSON decode failed. [" + parse_error.msg + "]")
-            logger.error("error at pos: ", parse_error.pos,
-                  " line: ", parse_error.lineno)
+            logger.error("error at pos: ", parse_error.pos, " line: ", parse_error.lineno)
             sys.exit(1)
 
 
@@ -288,8 +288,7 @@ def start_daemon(pidf, logf, wdir, configf, nodaemon):
         logger.debug('mqttsensor: pidf = {}    logf = {}'.format(pidf, logf))
         logger.debug('mqttsensor: about to start daemonization')
 
-        with daemon.DaemonContext(working_directory=wdir, umask=0o002,
-                                  pidfile=lockfile.FileLock(pidf), ):
+        with daemon.DaemonContext(working_directory=wdir, umask=0o002, pidfile=lockfile.FileLock(pidf)):
             start_processing(configf)
 
 
