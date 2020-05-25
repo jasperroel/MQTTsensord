@@ -137,5 +137,9 @@ upsdata
 
 .DS_Store
 
+## Running temp stuff
+*.pid
+*.pid.lock
+
 .idea/
 configuration.json
