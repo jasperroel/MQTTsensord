@@ -136,3 +136,6 @@ secret
 upsdata
 
 .DS_Store
+
+.idea/
+configuration.json

@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import sys
-import os
 import time
 import argparse
 import logging
@@ -10,9 +9,9 @@ import paho.mqtt.client as mqtt
 import lockfile
 import re
 import subprocess
-import Adafruit_DHT as dht
 
 debug_p = False
+logger = logging.getLogger(__name__)
 
 
 #
@@ -26,12 +25,32 @@ def json_response(data):
 # apcaccess_host() get APC UPS info for given host and port
 #
 def apcaccess_json(host='localhost', port='3551'):
-
     apcaccess_cmd = '/sbin/apcaccess'
     apcaccess_host = str(host) + ":" + str(port)
     apcaccess_args = [apcaccess_cmd, '-h', apcaccess_host]
-    wanted_keys = ('UPSNAME', 'HOSTNAME', 'STATUS', 'BCHARGE',
-                   'TIMELEFT', 'LINEV')
+    wanted_keys = (
+        'APC',
+        'DATE',
+        'HOSTNAME',
+        'VERSION',
+        'UPSNAME',
+        'CABLE',
+        'DRIVER',
+        'UPSMODE',
+        'STARTTIME',
+        'MODEL',
+        'STATUS',
+        'LINEV',
+        'LOADPCT',
+        'BCHARGE',
+        'TIMELEFT',
+        'MBATTCHG',
+        'MINTIMEL',
+        'MAXTIME',
+        'MAXLINEV',
+        'MINLINEV',
+        'OUTPUTV'
+    )
     units_re = re.compile(' (Percent|Volts|Minutes|Seconds)$', re.IGNORECASE)
     errors = 0
     ups_data = {}
@@ -47,7 +66,7 @@ def apcaccess_json(host='localhost', port='3551'):
         return json_response(ups_data)
 
     # check the return code
-    if (stderr or apcaccess_subprocess.returncode):
+    if stderr or apcaccess_subprocess.returncode:
         ups_data['errors'] = 1
         ups_data['returncode'] = apcaccess_subprocess.returncode
         if stderr:
@@ -71,12 +90,15 @@ def apcaccess_json(host='localhost', port='3551'):
                 if units != '':
                     v = re.sub(units_re, '', v)
                     k = k + units.upper()
+                # Try to parse the numeric items
+                try:
+                    v = float(v)
+                except ValueError:
+                    pass
                 ups_data[k] = v
-                # print("[" + k + "] -> [" + v + "]")
         except Exception as e:
-            # print errors to stderr
-            print("Error parsing apcupsd line: {}".format(e), file=sys.stderr)
-            print(line, file=sys.stderr)
+            logger.error("Error parsing apcupsd line: {}".format(e))
+            logger.error(line)
             errors = errors + 1
 
     if errors > 0:
@@ -86,72 +108,49 @@ def apcaccess_json(host='localhost', port='3551'):
 
 
 #
-# read_dht - read temperature and humidity from dht11/dht22 sensor
-#
-def read_dht(client, sensor, userdata, dht_type=dht.DHT22):
-    sensor_data = {}
-    # TODO: error checking on GPIO
-    humidity, temperature = dht.read_retry(dht_type, sensor['gpio'])
-    humidity = round(humidity, 2)
-    temperature = round(temperature, 2)
-    sensor_data['temperature'] = temperature
-    sensor_data['humidity'] = humidity
-    return(json_response(sensor_data))
-
-
-#
 # read_sensor()  read an individual sensor and send MQTT message
 #
-def read_sensor(client, sensor, userdata):
-
+def read_sensor(client, sensor):
     sensor_type = sensor['type']
     if sensor_type == 'apcups':
-        sensor_data = apcaccess_json(sensor['host'],
-                                     sensor['port'])
-    elif sensor_type == 'dht22':
-        sensor_data = read_dht(client, sensor, userdata, dht.DHT22)
-    elif sensor_type == 'dht11':
-        sensor_data = read_dht(client, sensor, userdata, dht.DHT11)
+        sensor_data = apcaccess_json(sensor['host'], sensor['port'])
     else:
-        sensor_data = json_response({'error':
-                                     'bad sensor type: ' + sensor_type})
+        sensor_data = json_response({'error': 'bad sensor type: ' + sensor_type})
 
-    userdata['logger'].debug("update sensor data: " + sensor['topic'])
+    logger.debug("update sensor data: %s", sensor['topic'])
 
     now = time.time()
     sensor['last_updated'] = now
 
-    if debug_p:
-        print('Sensor Topic: ', sensor['topic'])
+    logger.debug('Sensor Topic: %s', sensor['topic'])
 
     # Only send update if the results are different or we're past the
     # minimum update period
-    if ((sensor_data != sensor['last_sent_data']) or
-            (sensor['last_sent_time'] + sensor['update_interval'] < now)):
+    if (sensor_data != sensor['last_sent_data']) or (sensor['last_sent_time'] + sensor['update_interval'] < now):
 
-        if debug_p:
-            if (sensor['last_sent_time'] + sensor['update_interval'] < now):
-                print('Update_interval exceeded')
-            else:
-                print('Data changed')
-            print('PUBLISHING SENSOR DATA to MQTT')
+        if sensor['last_sent_time'] + sensor['update_interval'] < now:
+            logger.debug('Update_interval exceeded')
+        else:
+            logger.debug('Data changed')
+        logger.debug('PUBLISHING SENSOR DATA to MQTT')
 
         client.publish(sensor['topic'], payload=sensor_data, qos=0,
                        retain=False)
 
-        userdata['logger'].debug("publish sensor data: " +
-                                 sensor['topic'])
+        logger.debug("publish sensor data: " + sensor['topic'])
 
         sensor['last_sent_data'] = sensor_data
         sensor['last_sent_time'] = now
     else:
-        if debug_p:
-            print('NO CHANGE in DATA')
+        logger.debug('NO CHANGE in DATA')
+
 
 #
 # Callback for when the client receives a CONNACK response from the server.
 #
-def on_connect(client, userdata, flags, rc):
+# (_flags is unused)
+#
+def on_connect(client, userdata, _flags, rc):
     if 'subscribe' in userdata:
         for subscribe_topic in userdata['subscribe']:
             client.subscribe(subscribe_topic)
@@ -172,134 +171,76 @@ def on_connect(client, userdata, flags, rc):
 
 
 #
-# Try/except wrapper for MQTT Messages
+# setup logging
 #
-def on_message(client, userdata, message):
-    # wrap the on_message() processing in a try:
-    try:
-        _on_message(client, userdata, message)
-    except Exception as e:
-        userdata['logger'].error("on_message() failed: {}".format(e))
-
-
-#
-# Callback for MQTT Messages
-#
-def _on_message(client, userdata, message):
-    topic = message.topic
-
-    (prefix, name) = topic.split('/', 1)
-
-    if name == "UPDATE":
-        # this is an update request, ignore
-        return
-
-    m_decode = str(message.payload.decode("utf-8", "ignore"))
+def set_logging(logf):
+    global debug_p
     if debug_p:
-        print("Received message '" + m_decode +
-              "' on topic '" + topic +
-              "' with QoS " + str(message.qos))
-
-    log_snippet = (m_decode[:15] + '..') if len(m_decode) > 17 else m_decode
-    log_snippet = log_snippet.replace('\n', ' ')
-
-    userdata['logger'].debug("Received message '" +
-                             log_snippet +
-                             "' on topic '" + topic +
-                             "' with QoS " + str(message.qos))
-
-    try:
-        msg_data = json.loads(m_decode)
-    except json.JSONDecodeError as parse_error:
-        if debug_p:
-            print("JSON decode failed. [" + parse_error.msg + "]")
-            print("error at pos: " + parse_error.pos +
-                  " line: " + parse_error.lineno)
-        userdata['logger'].error("JSON decode failed.")
-
-    # python <=3.4.* use ValueError
-    # except ValueError as parse_error:
-    #    if debug_p:
-    #        print("JSON decode failed: " + str(parse_error))
-
-    # TODO: process incoming msg_data
-    # handle_message(topic, msg_data, userdata)
+        logger.setLevel(logging.DEBUG)
+        ch = logging.StreamHandler()
+        ch.setLevel(logging.DEBUG)
+        logger.addHandler(ch)
+    else:
+        logger.setLevel(logging.DEBUG)
+    fh = logging.FileHandler(logf)
+    formatstr = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    formatter = logging.Formatter(formatstr)
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
 
 
 #
-# move a sevro - coming soon...
+# read config file
 #
-def move_servo(name, message, userdata):
-    # config_data = userdata['config_data']
-    pass
+def get_config_file(configf):
+    with open(configf) as json_data_file:
+        try:
+            return json.load(json_data_file)
+        except json.JSONDecodeError as parse_error:
+            logger.error("JSON decode failed. [" + parse_error.msg + "]")
+            logger.error("error at pos: ", parse_error.pos,
+                  " line: ", parse_error.lineno)
+            sys.exit(1)
+
+
+def connect_to_mqtt(host, port, client_id, username, password):
+    logger.info("connecting to host " + host + ":" + str(port))
+
+    # how to mqtt in python see https://pypi.org/project/paho-mqtt/
+    mqtt_client = mqtt.Client(client_id=client_id,
+                              clean_session=True)
+
+    mqtt_client.username_pw_set(username, password)
+
+    # create callbacks
+    mqtt_client.on_connect = on_connect
+
+    if port == 4883 or port == 4884 or port == 8883 or port == 8884:
+        mqtt_client.tls_set('/etc/ssl/certs/ca-certificates.crt')
+
+    mqtt_client.connect(host, port, 60)
+    mqtt_client.loop_start()
+
+    return mqtt_client
 
 
 #
 # This starts the work part of the deamon. Starts MQTT client.
 # Runs scheduler loop to poll sensors.
 #
-def do_something(logf, configf):
-
-    #
-    # setup logging
-    #
-    logger = logging.getLogger('mqttsensord')
-    logger.setLevel(logging.INFO)
-    fh = logging.FileHandler(logf)
-    fh.setLevel(logging.INFO)
-    formatstr = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    formatter = logging.Formatter(formatstr)
-    fh.setFormatter(formatter)
-    logger.addHandler(fh)
-
-    # read config file
-    with open(configf) as json_data_file:
-        try:
-            config_data = json.load(json_data_file)
-        except json.JSONDecodeError as parse_error:
-            print("JSON decode failed. [" + parse_error.msg + "]")
-            print("error at pos: ", parse_error.pos,
-                  " line: ",  parse_error.lineno)
-            sys.exit(1)
+def start_processing(configf):
+    config_data = get_config_file(configf)
 
     # connect to MQTT server
     host = config_data['mqtt_host']
     port = config_data['mqtt_port'] if 'mqtt_port' in config_data else 8883
-    default_interval = config_data['default_interval'] if 'default_interval' in config_data else 5
-
-    logger.info("connecting to host " + host + ":" + str(port))
-
-    if debug_p:
-        logger.setLevel(logging.DEBUG)
-        print("connecting to host " + host + ":" + str(port))
-
-    userdata = {
-        'logger': logger,
-        'host': host,
-        'port': port,
-        'config_data': config_data,
-        }
-
     # Client id needs to be unique to this client
     client_id = config_data['client_id'] if 'client_id' in config_data else 'mqttsensord'
+    username = config_data['mqtt_user']
+    password = config_data['mqtt_password']
+    mqtt_client = connect_to_mqtt(host, port, client_id, username, password)
 
-    # how to mqtt in python see https://pypi.org/project/paho-mqtt/
-    mqttc = mqtt.Client(client_id=client_id,
-                        clean_session=True,
-                        userdata=userdata)
-
-    mqttc.username_pw_set(config_data['mqtt_user'],
-                          config_data['mqtt_password'])
-
-    # create callbacks
-    mqttc.on_connect = on_connect
-    mqttc.on_message = on_message
-
-    if port == 4883 or port == 4884 or port == 8883 or port == 8884:
-        mqttc.tls_set('/etc/ssl/certs/ca-certificates.crt')
-
-    mqttc.connect(host, port, 60)
-    mqttc.loop_start()
+    default_interval = config_data['default_interval'] if 'default_interval' in config_data else 5
 
     for sensor in config_data['sensors']:
         # set defaults
@@ -313,7 +254,7 @@ def do_something(logf, configf):
 
     for sensor in config_data['sensors']:
         # first time for each sensor
-        read_sensor(mqttc, sensor, userdata)
+        read_sensor(mqtt_client, sensor)
 
     while True:
         time.sleep(1)
@@ -321,43 +262,43 @@ def do_something(logf, configf):
         for sensor in config_data['sensors']:
             if sensor['last_updated'] + sensor['poll_interval'] < now:
                 try:
-                    read_sensor(mqttc, sensor, userdata)
+                    read_sensor(mqtt_client, sensor)
                 except Exception as e:
-                    userdata['logger'].error("read_sensor failed: {}".format(e))
-                    userdata['logger'].error("read_sensor failed: {}".format(sensor))
-                if debug_p:
-                    print(sensor)
-                    print('---------------------')
+                    logger.error("read_sensor failed: {}".format(e))
+                    logger.error("read_sensor failed: {}".format(sensor))
+                logger.debug(sensor)
+                logger.debug('---------------------')
 
-    mqttc.disconnect()
-    mqttc.loop_stop()
+    # The below code is unreachable (because of "while True:")
+    # mqttc.disconnect()
+    # mqttc.loop_stop()
 
 
 def start_daemon(pidf, logf, wdir, configf, nodaemon):
     global debug_p
 
+    set_logging(logf)
     if nodaemon:
         # non-daemon mode, for debugging.
-        print("Non-Daemon mode.")
-        do_something(logf, configf)
+        logger.info('Non-Daemon mode.')
+        start_processing(configf)
     else:
         # daemon mode
-        if debug_p:
-            print("mqttsensor: entered run()")
-            print("mqttsensor: pidf = {}    logf = {}".format(pidf, logf))
-            print("mqttsensor: about to start daemonization")
+        logger.debug('mqttsensor: entered run()')
+        logger.debug('mqttsensor: pidf = {}    logf = {}'.format(pidf, logf))
+        logger.debug('mqttsensor: about to start daemonization')
 
         with daemon.DaemonContext(working_directory=wdir, umask=0o002,
-                                  pidfile=lockfile.FileLock(pidf),) as context:
-            do_something(logf, configf)
+                                  pidfile=lockfile.FileLock(pidf), ):
+            start_processing(configf)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="MQTT Sensor Deamon")
-    parser.add_argument('-p', '--pid-file', default='/home/pi/mqttsensord/mqttsensor.pid')
-    parser.add_argument('-l', '--log-file', default='/home/pi/mqttsensord/mqttsensor.log')
-    parser.add_argument('-d', '--working-dir', default='/home/pi/mqttsensord')
-    parser.add_argument('-c', '--config-file', default='/home/pi/mqttsensord/mqttsensord.json')
+    parser = argparse.ArgumentParser(description='MQTT Sensor Daemon')
+    parser.add_argument('-p', '--pid-file', default='mqttsensor.pid')
+    parser.add_argument('-l', '--log-file', default='mqttsensor.log')
+    parser.add_argument('-d', '--working-dir', default='.')
+    parser.add_argument('-c', '--config-file', default='mqttsensord.json')
     parser.add_argument('-n', '--no-daemon', action="store_true")
     parser.add_argument('-v', '--verbose', action="store_true")
 
