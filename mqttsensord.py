@@ -153,6 +153,10 @@ def read_sensor(client, sensor):
 # (_flags is unused)
 #
 def on_connect(client, userdata, _flags, rc):
+    if userdata is None:
+        logger.debug('None received for userdata')
+        return
+
     if 'subscribe' in userdata:
         for subscribe_topic in userdata['subscribe']:
             client.subscribe(subscribe_topic)
